@@ -21,6 +21,8 @@ class ImageClassificationModel:
         * directory:  where your model's folder should be (within it should be 
           folders for model saves, testing data, fitting data, and logs)
 
+        * num_of_classes:  the number of classes for your classification
+
         * color_mode:  how many color channels your model requires
           to differentiate between classifications (grayscale, rgb, or rgba).
 
@@ -66,6 +68,7 @@ class ImageClassificationModel:
         self.crop_to_aspect_ratio = crop_to_aspect_ratio
         self.data = None
         self.test_data = None
+        self.model = None
 
         #   Prevents out of memory errors
         gpus = tf.config.experimental.list_physical_devices('GPU')
@@ -80,7 +83,8 @@ class ImageClassificationModel:
         self,
         exts:list=['jpg','png','jpeg','bmp'],
         data_filename:String='data',
-        prints:bool=True
+        prints:bool=True,
+        delete:bool=False
     ):
         data_dir = os.path.join(self.directory, data_filename)
         #   Goes through each image in each image class to remove improper images
@@ -97,12 +101,12 @@ class ImageClassificationModel:
                     #   If the tip is not preferred, remove the file.
                     if ext not in exts:
                         if prints: print(f'Image not in ext list {image}')
-                        os.remove(image_path)
+                        if delete: os.remove(image_path)
 
                 except Exception as e:
                     #   If the image has some issue, remove the file.
                     if prints: print(f'Issue with image {image}')
-                    os.remove(image_path)
+                    if delete: os.remove(image_path)
     
     """
     Uses your data folder within your directory folder to create a TensorFlow
@@ -138,36 +142,44 @@ class ImageClassificationModel:
     convolutional layers output and finalize them into outputs that classify the
     images between 0 and 1 for each output node.
 
-    The default loss function is for models with only two potential outputs. Use
-    'tf.losses.CategoricalCrossentropy' for your loss function if you have
-    multiple classifications you want to test for.
+    The default loss function is for models with multiple potential outputs. Use
+    'tf.losses.binary_crossentroy' for your loss function if you have only two
+    classifications you want to test for.
     """
     def create(
         self,
         input_optimizer:String='adam',
-        input_loss=tf.losses.BinaryCrossentropy,
+        input_loss=tf.losses.CategoricalCrossentropy(),
         input_metrics:list=['accuracy']
     ):
         #   Creating the model and adding layers
-        model = Sequential()
+        self.model = Sequential()
+
+        #   Check the number of color channels
+        color_mode = self.color_mode.lower()
+        num_of_color_channels = 1
+        if color_mode == 'rgb':
+            num_of_color_channels = 3
+        elif color_mode == 'rgba':
+            num_of_color_channels = 4
 
         #   INPUT LAYER
-        model.add(Conv2D(16, (3,3), 1, activation='relu', input_shape=(256,256,3)))
-        model.add(MaxPooling2D())
+        self.model.add(Conv2D(16, (3,3), 1, activation='relu', input_shape=(256,256,num_of_color_channels)))
+        self.model.add(MaxPooling2D())
         #   HIDDEN LAYER 1
-        model.add(Conv2D(32, (3,3), 1, activation='relu'))
-        model.add(MaxPooling2D())
+        self.model.add(Conv2D(32, (3,3), 1, activation='relu'))
+        self.model.add(MaxPooling2D())
         #   HIDDEN LAYER 2
-        model.add(Conv2D(16, (3,3), 1, activation='relu'))
-        model.add(MaxPooling2D())
+        self.model.add(Conv2D(16, (3,3), 1, activation='relu'))
+        self.model.add(MaxPooling2D())
         #   HIDDEN LAYER 3
-        model.add(Flatten())
-        model.add(Dense(256, activation='relu'))
+        self.model.add(Flatten())
+        self.model.add(Dense(256, activation='relu'))
         #   OUTPUT LAYER
-        model.add(Dense(self.num_of_classes, activation='sigmoid'))
+        self.model.add(Dense(self.num_of_classes - 1, activation='sigmoid'))
 
         # Compile the model with an optimizer, loss function, and metrics to measure
-        model.compile(
+        self.model.compile(
             optimizer=input_optimizer,
             loss=input_loss, 
             metrics=input_metrics
@@ -179,27 +191,35 @@ class ImageClassificationModel:
 
     Uses the validation_split variable to determine how much data is for 
     training and how much is for validation while fitting.
+        * If you have a low amount of data, using validation_split can cause
+          errors if your batch_size is large.
     """
     def train(
         self,
-        logs_filename:String=None,
+        logs_filename:String='logs',
         epochs:int=5,
         show_analytics:bool=True
     ):
         #   Uses the logs folder as a way to log a model as it trains.
-        tensorboard_callback = tf.keras.callbacks.TensorBoard(log_dir=logs_filename)
+        log_dir = os.path.join(self.directory, logs_filename)
+        tensorboard_callback = tf.keras.callbacks.TensorBoard(log_dir=log_dir)
 
-        #   Gather the amount of training data that should be used when fitting.
+        #   Gather the amount of training/validation data that should be used when fitting.
         if self.validation_split is not None:
             train_size = int(len(self.data) * (1 - self.validation_split))
             validate_size = int(len(self.data) * self.validation_split)
+            #   Makes sure that all data fits into either training or validating.
+            if train_size + validate_size < len(self.data):
+                validate_size = len(self.data) - train_size
         else:
             train_size = 1
             validate_size = 0
 
-        training_data = self.data.take(train_size)
+        print(len(self.data))
+        print(train_size)
+        print(validate_size)
 
-        #   Gather the amount of validation data that should be used when fitting.
+        training_data = self.data.take(train_size)
         validation_data = self.data.skip(train_size).take(validate_size)
 
         #   Fits the model using the training data and validation data with 20 iterations.
@@ -211,7 +231,7 @@ class ImageClassificationModel:
         #   Using matplotlib to show how the losses changed over time.
         fig = plt.figure()
         plt.plot(hist.history['loss'], color='teal', label='loss')
-        plt.plot(hist.history['val_loss'], color='orange', label='val_loss')
+        if self.validation_split is not None: plt.plot(hist.history['val_loss'], color='orange', label='val_loss')
         fig.suptitle('Loss', fontsize=20)
         plt.legend(loc='upper left')
         plt.show()
@@ -219,7 +239,7 @@ class ImageClassificationModel:
         #   Using matplotlib to show how the accuracies changed over time.
         fig = plt.figure()
         plt.plot(hist.history['accuracy'], color='teal', label='loss')
-        plt.plot(hist.history['val_accuracy'], color='orange', label='val_loss')
+        if self.validation_split is not None: plt.plot(hist.history['val_accuracy'], color='orange', label='val_loss')
         fig.suptitle('Accuracy', fontsize=20)
         plt.legend(loc='upper left')
         plt.show()
@@ -239,7 +259,13 @@ class ImageClassificationModel:
         acc = BinaryAccuracy()
 
         test_path = os.path.join(self.directory, test_filename)
-        self.test_data = tf.keras.utils.image_dataset_from_directory(test_path)
+        self.test_data = tf.keras.utils.image_dataset_from_directory(
+            directory=test_path,
+            color_mode=self.color_mode,
+            batch_size=1,
+            image_size=self.image_size,
+            crop_to_aspect_ratio=self.crop_to_aspect_ratio
+        )
 
         #   Goes through each batch to check measurements of performance
         for batch in self.test_data.as_numpy_iterator():
@@ -275,4 +301,5 @@ class ImageClassificationModel:
         models_filename:String='models',
         model_name:String='classification_model'
     ): 
-        load_model(os.path.join(models_filename, f'{model_name}.h5'))
+        models_path = os.path.join(self.directory, models_filename)
+        load_model(os.path.join(models_path, f'{model_name}.h5'))
