@@ -6,8 +6,8 @@ import imghdr
 import numpy as np
 from matplotlib import pyplot as plt 
 from tensorflow.keras.models import Sequential
-from tensorflow.keras.layers import Conv2D, MaxPooling2D, Dense, Flatten 
-from tensorflow.keras.metrics import Precision, Recall, BinaryAccuracy
+from tensorflow.keras.layers import Conv2D, MaxPooling2D, Dense, Flatten, Rescaling
+from tensorflow.keras.metrics import Precision, Recall, Accuracy
 from tensorflow.keras.models import load_model
 
 class ImageClassificationModel:
@@ -51,8 +51,9 @@ class ImageClassificationModel:
         image_size=(256,256),
         shuffle:bool=True,
         seed:int=None,
-        validation_split:float=None,
-        crop_to_aspect_ratio:bool=False
+        validation_split:float=0,
+        crop_to_aspect_ratio:bool=False,
+        test_split:float=0
     ) -> None:
         #   Initializes all of the model variables
         self.directory = directory
@@ -64,6 +65,7 @@ class ImageClassificationModel:
         self.seed = seed
         self.validation_split = validation_split
         self.crop_to_aspect_ratio = crop_to_aspect_ratio
+        self.test_split = test_split
         self.data = None
         self.test_data = None
         self.model = None
@@ -113,8 +115,7 @@ class ImageClassificationModel:
     """
     def load_data(
         self,
-        data_filename:String='data',
-        adjust_data:bool=True
+        data_filename:String='data'
     ):
         #   Creates an automatic dataset based on your data folder within your directory
         self.data = tf.keras.utils.image_dataset_from_directory(
@@ -127,10 +128,6 @@ class ImageClassificationModel:
             crop_to_aspect_ratio=self.crop_to_aspect_ratio
         )
 
-        #   Adjusts the data within the color channels to be between 0 and 1 instead of 0 and 255
-        if adjust_data:
-            self.data = self.data.map(lambda x,  y: (x/255, y))
-
     """
     Creates a general classification model using 2D convolutional layers in with
     2D max pooling and non-linear activation functions in order to find features 
@@ -141,15 +138,21 @@ class ImageClassificationModel:
     images between 0 and 1 for each output node.
 
     The default loss function is for models with multiple potential outputs. Use
-    'tf.losses.binary_crossentroy' for your loss function if you have only two
+    'tf.losses.BinaryCrossentropy()' for your loss function if you have only two
     classifications you want to test for.
     """
     def create(
         self,
         input_optimizer:String='adam',
-        input_loss=tf.losses.CategoricalCrossentropy(),
+        input_loss=None,
         input_metrics:list=['accuracy']
     ):
+        if input_loss == None:
+            if self.num_of_classes <= 2:
+                input_loss = tf.losses.BinaryCrossentropy()
+            else:
+                input_loss = tf.losses.SparseCategoricalCrossentropy()
+
         #   Creating the model and adding layers
         self.model = Sequential()
 
@@ -162,7 +165,8 @@ class ImageClassificationModel:
             num_of_color_channels = 4
 
         #   INPUT LAYER
-        self.model.add(Conv2D(16, (3,3), 1, activation='relu', input_shape=(256,256,num_of_color_channels)))
+        self.model.add(Rescaling(1./255, input_shape=(self.image_size[0], self.image_size[1], num_of_color_channels)))
+        self.model.add(Conv2D(16, (3,3), 1, activation='relu', input_shape=(self.image_size[0], self.image_size[1], num_of_color_channels)))
         self.model.add(MaxPooling2D())
         #   HIDDEN LAYER 1
         self.model.add(Conv2D(32, (3,3), 1, activation='relu'))
@@ -174,7 +178,7 @@ class ImageClassificationModel:
         self.model.add(Flatten())
         self.model.add(Dense(256, activation='relu'))
         #   OUTPUT LAYER
-        self.model.add(Dense(self.num_of_classes - 1, activation='sigmoid'))
+        self.model.add(Dense(self.num_of_classes, activation='sigmoid'))
 
         # Compile the model with an optimizer, loss function, and metrics to measure
         self.model.compile(
@@ -203,22 +207,17 @@ class ImageClassificationModel:
         tensorboard_callback = tf.keras.callbacks.TensorBoard(log_dir=log_dir)
 
         #   Gather the amount of training/validation data that should be used when fitting.
-        if self.validation_split is not None:
-            train_size = int(len(self.data) * (1 - self.validation_split))
-            validate_size = int(len(self.data) * self.validation_split)
-            #   Makes sure that all data fits into either training or validating.
-            if train_size + validate_size < len(self.data):
-                validate_size = len(self.data) - train_size
-        else:
-            train_size = 1
-            validate_size = 0
+        train_size = int(len(self.data) * (1 - self.validation_split - self.test_split))
+        validate_size = int(len(self.data) * self.validation_split)
+        test_size = int(len(self.data) * self.test_split)
+        #   Makes sure that all data fits into either training or validating.
+        if train_size + validate_size + test_size < len(self.data):
+            validate_size = len(self.data) - train_size - test_size
 
-        print(len(self.data))
-        print(train_size)
-        print(validate_size)
-
+        #   Getting the training and validation data.
         training_data = self.data.take(train_size)
         validation_data = self.data.skip(train_size).take(validate_size)
+        self.test_data = self.data.skip(train_size).skip(validate_size).take(test_size)
 
         #   Fits the model using the training data and validation data with 20 iterations.
         #   Storing it in a hist (history) variables allows us to look at how our model trained.
@@ -242,6 +241,20 @@ class ImageClassificationModel:
         plt.legend(loc='upper left')
         plt.show()
 
+    def get_test(
+        self,
+        test_filename:String='test'
+    ):
+        test_path = os.path.join(self.directory, test_filename)
+        self.test_data = tf.keras.utils.image_dataset_from_directory(
+            directory=test_path,
+            color_mode=self.color_mode,
+            batch_size=1,
+            image_size=self.image_size,
+            shuffle=False,
+            crop_to_aspect_ratio=self.crop_to_aspect_ratio
+        )
+
     """
     Uses an user-generated test folder as means for testing classifications with
     a model (the indices of each folder within the test folder is used as the
@@ -249,21 +262,16 @@ class ImageClassificationModel:
     """
     def test(
         self,
-        test_filename:String='test'
+        individual_prints:bool=True
     ):
+        if (self.test_data is None):
+            print('Test data has not been found yet. Run get_test() to use test files, or set test_split greater than 0 and run train().')
+            return
+
         #   Creating instances of these classes to measure prediction.
         pre = Precision()
         re = Recall()
-        acc = BinaryAccuracy()
-
-        test_path = os.path.join(self.directory, test_filename)
-        self.test_data = tf.keras.utils.image_dataset_from_directory(
-            directory=test_path,
-            color_mode=self.color_mode,
-            batch_size=1,
-            image_size=self.image_size,
-            crop_to_aspect_ratio=self.crop_to_aspect_ratio
-        )
+        acc = Accuracy()
 
         #   Goes through each batch to check measurements of performance
         for batch in self.test_data.as_numpy_iterator():
@@ -271,7 +279,10 @@ class ImageClassificationModel:
             X, y = batch
             #   Makes a prediction using the images as to what the labels will be
             y_actual = self.model.predict(X)
+            #   Find index of highest value (should be same as y) 
+            y_actual = tf.constant(tf.math.argmax(y_actual[0]), shape=(1))
             #   Update measurements
+            if individual_prints: print(f'Expected output: {y}, actual output: {y_actual}')
             pre.update_state(y, y_actual)
             re.update_state(y, y_actual)
             acc.update_state(y, y_actual)
@@ -289,15 +300,20 @@ class ImageClassificationModel:
         models_filename:String='models',
         model_name:String='classification_model'
     ):
-        self.model.save(os.path.join(models_filename,f'{model_name}.h5'))
+        models_path = os.path.join(self.directory, models_filename)
+        self.model.save(os.path.join(models_path,f'{model_name}.h5'))
 
     """
     Loads your desired model using TensorFlow's load_model method.
     """
     def load(
         self,
-        models_filename:String='models',
-        model_name:String='classification_model'
+        model_name:String='classification_model',
+        models_filename:String='models'
     ): 
         models_path = os.path.join(self.directory, models_filename)
-        load_model(os.path.join(models_path, f'{model_name}.h5'))
+        try:
+            self.model = load_model(os.path.join(models_path, f'{model_name}.h5'))
+            print(f'Successfully loaded model {model_name}.h5')
+        except Exception as e:
+            print(f'Unable to load model {model_name}.h5: {e}')
